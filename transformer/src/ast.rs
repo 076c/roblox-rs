@@ -247,6 +247,36 @@ impl LuauAssignment {
     }
 }
 
+/// Represents a function call statement.
+/// Grammar:
+/// ```text
+/// stat ::= functioncall
+/// ```
+#[derive(Debug)]
+pub struct LuauFunctionCallStatement {
+    pub call: LuauFunctionCall,
+}
+
+impl LuauStatement for LuauFunctionCallStatement {
+    fn type_of(&self) -> LuauStatementType {
+        LuauStatementType::FunctionCall
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+impl LuauFunctionCallStatement {
+    pub fn new(call: LuauFunctionCall) -> Self {
+        Self { call }
+    }
+}
+
 /// Represents a function declaration.
 ///
 /// Grammar:

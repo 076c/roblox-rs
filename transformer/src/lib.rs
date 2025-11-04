@@ -3,9 +3,7 @@
 mod ast;
 mod visitor;
 use crate::ast::*;
-use std::any::Any;
 use std::collections::HashMap;
-use std::sync::Arc;
 use syn::File;
 
 /// Parses a string into a syn `File`
@@ -173,15 +171,36 @@ pub fn transform_statement(
 ) -> Result<(Option<Vec<Box<dyn LuauStatement>>>, Vec<(String, bool)>), syn::Error> {
     match statement {
         syn::Stmt::Item(item) => transform_item(item, mut_map),
-        syn::Stmt::Expr(expr, has_semicolon) => Ok((
-            Some(vec![Box::new(LuauDoBlock::new(LuauBlock::new(
+        syn::Stmt::Expr(expr, semicolon) => match semicolon {
+            Some(_) => Ok((
+                Some(vec![Box::new(LuauFunctionCallStatement::new(
+                    LuauFunctionCall::new(
+                        Box::new(LuauFunctionLiteral::new(LuauFunctionBody::new(
+                            vec![],
+                            vec![],
+                            false,
+                            None,
+                            LuauBlock::new(
+                                vec![Box::new(LuauReturnStatement::new(vec![
+                                    transform_expression(&expr, mut_map).unwrap(),
+                                ]))],
+                                None,
+                            ),
+                        ))),
+                        None,
+                        vec![],
+                    ),
+                ))]),
                 vec![],
-                Some(Box::new(LuauReturnStatement::new(vec![
+            )),
+            _ => Ok((
+                Some(vec![Box::new(LuauReturnStatement::new(vec![
                     transform_expression(&expr, mut_map).unwrap(),
-                ]))),
-            )))]),
-            vec![],
-        )),
+                ]))]),
+                vec![],
+            )),
+        },
+
         _ => todo!(),
     }
 }
