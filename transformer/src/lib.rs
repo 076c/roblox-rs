@@ -3,7 +3,9 @@
 mod ast;
 mod visitor;
 use crate::ast::*;
+use std::any::Any;
 use std::collections::HashMap;
+use std::sync::Arc;
 use syn::File;
 
 /// Parses a string into a syn `File`
@@ -64,7 +66,10 @@ pub fn transform_lit(lit: &syn::Lit) -> Option<Box<dyn LuauExpression>> {
 }
 
 /// Transforms a syn `Expr` into a Luau expression
-pub fn transform_expression(expr: &syn::Expr) -> Option<Box<dyn LuauExpression>> {
+pub fn transform_expression(
+    expr: &syn::Expr,
+    mut_map: &HashMap<String, bool>,
+) -> Option<Box<dyn LuauExpression>> {
     match expr {
         syn::Expr::Lit(literal) => transform_lit(&literal.lit),
         syn::Expr::Array(array) => Some(Box::new(LuauTableConstructor::new(
@@ -74,26 +79,27 @@ pub fn transform_expression(expr: &syn::Expr) -> Option<Box<dyn LuauExpression>>
                 .map(|element| {
                     LuauTableField::ArrayValue(
                         // TODO: don't use nil expression, panic
-                        transform_expression(element).unwrap_or(Box::new(LuauNilLiteral::new())),
+                        transform_expression(element, mut_map)
+                            .unwrap_or(Box::new(LuauNilLiteral::new())),
                     )
                 })
                 .collect(),
         ))),
         syn::Expr::Paren(expr) => Some(Box::new(LuauGroupedExpression::new(transform_expression(
-            &expr.expr,
+            &expr.expr, mut_map,
         )?))),
         syn::Expr::Binary(binary_expr) => Some(Box::new(LuauBinaryExpression::new(
-            transform_expression(&binary_expr.left).unwrap(),
+            transform_expression(&binary_expr.left, mut_map).unwrap(),
             transform_bin_op(binary_expr.op),
-            transform_expression(&binary_expr.right).unwrap(),
+            transform_expression(&binary_expr.right, mut_map).unwrap(),
         ))),
         syn::Expr::Call(call_expr) => Some(Box::new(LuauFunctionCall::new(
-            transform_expression(&call_expr.func).unwrap(),
+            transform_expression(&call_expr.func, mut_map).unwrap(),
             None,
             call_expr
                 .args
                 .iter()
-                .map(|arg| transform_expression(arg).unwrap())
+                .map(|arg| transform_expression(arg, mut_map).unwrap())
                 .collect(),
         ))),
         syn::Expr::Closure(closure_expr) => {
@@ -119,7 +125,7 @@ pub fn transform_expression(expr: &syn::Expr) -> Option<Box<dyn LuauExpression>>
                 false,
                 None,
                 match &*closure_expr.body {
-                    syn::Expr::Block(block) => transform_block(&block.block),
+                    syn::Expr::Block(block) => transform_block(&block.block, mut_map),
                     _ => panic!("invalid expression"),
                 },
             ))))
@@ -161,8 +167,55 @@ pub fn transform_pat(pat: &syn::Pat) -> (LuauVar, bool) {
     }
 }
 
+pub fn transform_statement(
+    statement: &syn::Stmt,
+    mut_map: &HashMap<String, bool>,
+) -> Result<(Option<Vec<Box<dyn LuauStatement>>>, Vec<(String, bool)>), syn::Error> {
+    match statement {
+        syn::Stmt::Item(item) => transform_item(item, mut_map),
+        syn::Stmt::Expr(expr, has_semicolon) => Ok((
+            Some(vec![Box::new(LuauDoBlock::new(LuauBlock::new(
+                vec![],
+                Some(Box::new(LuauReturnStatement::new(vec![
+                    transform_expression(&expr, mut_map).unwrap(),
+                ]))),
+            )))]),
+            vec![],
+        )),
+        _ => todo!(),
+    }
+}
+
 /// Transforms a syn `Block` into a Luau block
-pub fn transform_block(block: &syn::Block) -> LuauBlock {}
+pub fn transform_block(block: &syn::Block, mut_map: &HashMap<String, bool>) -> LuauBlock {
+    let mut statements: Vec<Box<dyn LuauStatement>> = vec![];
+    let mut muts_written: Vec<(String, bool)> = vec![];
+    let mut terminator: Option<Box<dyn LuauStatement>> = None;
+
+    for stmt in &block.stmts {
+        let (stmts, muts) = transform_statement(stmt, mut_map).unwrap();
+        if let Some(stmts) = stmts {
+            for stmt in stmts {
+                if terminator.is_some() {
+                    panic!("cannot execute after terminator")
+                }
+
+                match stmt.type_of() {
+                    // Terminators (terminate control flow)
+                    LuauStatementType::Return => terminator = Some(stmt),
+                    LuauStatementType::Continue => terminator = Some(stmt),
+                    LuauStatementType::Break => terminator = Some(stmt),
+
+                    // Don't terminate control flow
+                    _ => statements.push(stmt),
+                };
+            }
+        }
+        muts_written.extend(muts);
+    }
+
+    LuauBlock::new(statements, terminator)
+}
 
 /// Transforms a syn `Type` into a Luau type definition
 pub fn transform_type() {}
@@ -194,7 +247,7 @@ pub fn transform_item(
                     "mutating immutable variable",
                 ));
             }
-            let expr = transform_expression(&const_item.expr);
+            let expr = transform_expression(&const_item.expr, mut_map);
 
             Ok((
                 Some(vec![Box::new(LuauAssignment::new(
@@ -215,7 +268,7 @@ pub fn transform_item(
                     // TODO: don't use clone?
                     vec![LuauVar::Name(name.clone())],
                     vec![
-                        transform_expression(&static_item.expr)
+                        transform_expression(&static_item.expr, mut_map)
                             .unwrap_or(Box::new(LuauNilLiteral::new())),
                     ],
                     Some("=".to_string()),
@@ -257,7 +310,7 @@ pub fn transform_item(
                         bindings,
                         false,
                         None,
-                        transform_block(&function_item.block),
+                        transform_block(&function_item.block, mut_map),
                     ),
                 ))]),
                 vec![(function_name, false)],
@@ -276,7 +329,7 @@ pub fn transform(ast: &File) -> LuauAst {
     let mut mutability_map: HashMap<String, bool> = HashMap::new();
 
     // Last statement that terminates the block (main scope)
-    let terminator: Option<Box<dyn LuauLastStatement>> = None;
+    let terminator: Option<Box<dyn LuauStatement>> = None;
 
     // Iterate every statement and add it to the list of statements
     ast.items.iter().for_each(|item| {

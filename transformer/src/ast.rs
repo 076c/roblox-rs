@@ -3,6 +3,7 @@
 /// This module defines the abstract syntax tree used to represent Luau code.
 ///
 ///!
+use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::Debug;
 
@@ -35,23 +36,26 @@ pub struct LuauBlock {
     /// The list of statements contained in this block.
     pub statements: Vec<Box<dyn LuauStatement>>,
     /// An optional terminating statement such as `return`, `break`, or `continue`.
-    pub last_statement: Option<Box<dyn LuauLastStatement>>,
+    pub last_statement: Option<Box<dyn LuauStatement>>,
     /// Mutability map to check the mutability of variables in the block.
     pub mutability_map: HashMap<String, bool>,
 }
 
 impl LuauBlock {
-    pub fn new(statements: Vec<Box<dyn LuauStatement>>) -> Self {
+    pub fn new(
+        statements: Vec<Box<dyn LuauStatement>>,
+        last_statement: Option<Box<dyn LuauStatement>>,
+    ) -> Self {
         Self {
             statements,
-            last_statement: None,
+            last_statement: last_statement,
             mutability_map: HashMap::new(),
         }
     }
 }
 
 /// Enumerates all types of statements recognized by the Luau grammar.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum LuauStatementType {
     Assignment,
     CompoundAssignment,
@@ -67,10 +71,13 @@ pub enum LuauStatementType {
     LocalBinding,
     TypeDefinition,
     FunctionTypeDefinition,
+    Return,
+    Break,
+    Continue,
 }
 
 /// Enumerates all types of expressions recognized by the Luau grammar.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum LuauExpressionType {
     Nil,
     Boolean,
@@ -88,34 +95,41 @@ pub enum LuauExpressionType {
 }
 
 /// Represents any statement node.
-pub trait LuauStatement: Debug {
+pub trait LuauStatement: Debug + Any {
     /// Returns the high-level classification of this statement.
     fn type_of(&self) -> LuauStatementType;
+    fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
 /// Represents any expression node.
-pub trait LuauExpression: Debug {
+pub trait LuauExpression: Debug + Any {
     /// Returns the expression's classification.
     fn type_of(&self) -> LuauExpressionType;
+    fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
-/// Represents a `laststat` production, which terminates a block.
-///
-/// Grammar:
-/// ```text
-/// laststat ::= 'return' [explist] | 'break' | 'continue'
-/// ```
-#[derive(Debug)]
-pub enum LuauLastStatementType {
-    Return,
-    Break,
-    Continue,
-}
+// Cause Rust to freak out, append to normal statements
+// /// Represents a `laststat` production, which terminates a block.
+// ///
+// /// Grammar:
+// /// ```text
+// /// laststat ::= 'return' [explist] | 'break' | 'continue'
+// /// ```
+// #[derive(Debug)]
+// pub enum LuauLastStatementType {
+//     Return,
+//     Break,
+//     Continue,
+// }
 
-/// Trait for terminal statements like `return`, `break`, or `continue`.
-pub trait LuauLastStatement: Debug {
-    fn type_of(&self) -> LuauLastStatementType;
-}
+// /// Trait for terminal statements like `return`, `break`, or `continue`.
+// pub trait LuauLastStatement: Debug + Any {
+//     fn type_of(&self) -> LuauLastStatementType;
+//     fn as_any(&self) -> &dyn Any;
+//     fn as_any_mut(&mut self) -> &mut dyn Any;
+// }
 
 /// Represents a Luau type definition reference (not a full type expression).
 ///
@@ -197,6 +211,14 @@ impl LuauStatement for LuauAssignment {
             LuauStatementType::Assignment
         }
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
 }
 
 impl LuauAssignment {
@@ -241,6 +263,14 @@ pub struct LuauFunctionDeclaration {
 impl LuauStatement for LuauFunctionDeclaration {
     fn type_of(&self) -> LuauStatementType {
         LuauStatementType::FunctionDeclaration
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }
 
@@ -299,6 +329,349 @@ pub struct LuauAttribute {
     pub parameters: Vec<Box<dyn LuauExpression>>,
 }
 
+/// Represents a type alias or type definition.
+///
+/// Grammar:
+/// ```text
+/// stat ::= ['export'] 'type' NAME ['<' GenericTypeListWithDefaults '>'] '=' Type
+/// ```
+#[derive(Debug)]
+pub struct LuauTypeDefinition {
+    pub name: String,
+    pub generic_parameters: Vec<String>,
+    pub type_expr: Box<dyn LuauExpression>,
+    pub exported: bool,
+}
+
+impl LuauStatement for LuauTypeDefinition {
+    fn type_of(&self) -> LuauStatementType {
+        LuauStatementType::TypeDefinition
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+impl LuauTypeDefinition {
+    pub fn new(
+        name: String,
+        generic_parameters: Vec<String>,
+        type_expr: Box<dyn LuauExpression>,
+        exported: bool,
+    ) -> Self {
+        Self {
+            name,
+            generic_parameters,
+            type_expr,
+            exported,
+        }
+    }
+}
+
+/// Represents a `do ... end` block statement.
+///
+/// Grammar:
+/// ```text
+/// stat ::= 'do' block 'end'
+/// ```
+#[derive(Debug)]
+pub struct LuauDoBlock {
+    pub block: LuauBlock,
+}
+
+impl LuauStatement for LuauDoBlock {
+    fn type_of(&self) -> LuauStatementType {
+        LuauStatementType::DoBlock
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+impl LuauDoBlock {
+    pub fn new(block: LuauBlock) -> Self {
+        Self { block }
+    }
+}
+
+/// Represents a `while ... do ... end` loop.
+///
+/// Grammar:
+/// ```text
+/// stat ::= 'while' exp 'do' block 'end'
+/// ```
+#[derive(Debug)]
+pub struct LuauWhileLoop {
+    pub condition: Box<dyn LuauExpression>,
+    pub body: LuauBlock,
+}
+
+impl LuauStatement for LuauWhileLoop {
+    fn type_of(&self) -> LuauStatementType {
+        LuauStatementType::WhileLoop
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+impl LuauWhileLoop {
+    pub fn new(condition: Box<dyn LuauExpression>, body: LuauBlock) -> Self {
+        Self { condition, body }
+    }
+}
+
+/// Represents a `repeat ... until ...` loop.
+///
+/// Grammar:
+/// ```text
+/// stat ::= 'repeat' block 'until' exp
+/// ```
+#[derive(Debug)]
+pub struct LuauRepeatLoop {
+    pub body: LuauBlock,
+    pub condition: Box<dyn LuauExpression>,
+}
+
+impl LuauStatement for LuauRepeatLoop {
+    fn type_of(&self) -> LuauStatementType {
+        LuauStatementType::RepeatLoop
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+impl LuauRepeatLoop {
+    pub fn new(body: LuauBlock, condition: Box<dyn LuauExpression>) -> Self {
+        Self { body, condition }
+    }
+}
+
+/// Represents an `if ... then ... elseif ... else ... end` statement.
+///
+/// Grammar:
+/// ```text
+/// stat ::= 'if' exp 'then' block {'elseif' exp 'then' block} ['else' block] 'end'
+/// ```
+#[derive(Debug)]
+pub struct LuauIfStatement {
+    pub condition: Box<dyn LuauExpression>,
+    pub then_block: LuauBlock,
+    pub elseif_blocks: Vec<(Box<dyn LuauExpression>, LuauBlock)>,
+    pub else_block: Option<LuauBlock>,
+}
+
+impl LuauStatement for LuauIfStatement {
+    fn type_of(&self) -> LuauStatementType {
+        LuauStatementType::IfStatement
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+impl LuauIfStatement {
+    pub fn new(
+        condition: Box<dyn LuauExpression>,
+        then_block: LuauBlock,
+        elseif_blocks: Vec<(Box<dyn LuauExpression>, LuauBlock)>,
+        else_block: Option<LuauBlock>,
+    ) -> Self {
+        Self {
+            condition,
+            then_block,
+            elseif_blocks,
+            else_block,
+        }
+    }
+}
+
+/// Represents a numeric `for` loop.
+///
+/// Grammar:
+/// ```text
+/// stat ::= 'for' binding '=' exp ',' exp [',' exp] 'do' block 'end'
+/// ```
+#[derive(Debug)]
+pub struct LuauNumericFor {
+    pub binding: LuauBinding,
+    pub start: Box<dyn LuauExpression>,
+    pub end: Box<dyn LuauExpression>,
+    pub step: Option<Box<dyn LuauExpression>>,
+    pub body: LuauBlock,
+}
+
+impl LuauStatement for LuauNumericFor {
+    fn type_of(&self) -> LuauStatementType {
+        LuauStatementType::NumericFor
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+impl LuauNumericFor {
+    pub fn new(
+        binding: LuauBinding,
+        start: Box<dyn LuauExpression>,
+        end: Box<dyn LuauExpression>,
+        step: Option<Box<dyn LuauExpression>>,
+        body: LuauBlock,
+    ) -> Self {
+        Self {
+            binding,
+            start,
+            end,
+            step,
+            body,
+        }
+    }
+}
+
+/// Represents a generic `for ... in ... do ... end` loop.
+///
+/// Grammar:
+/// ```text
+/// stat ::= 'for' bindinglist 'in' explist 'do' block 'end'
+/// ```
+#[derive(Debug)]
+pub struct LuauGenericFor {
+    pub bindings: Vec<LuauBinding>,
+    pub iterators: Vec<Box<dyn LuauExpression>>,
+    pub body: LuauBlock,
+}
+
+impl LuauStatement for LuauGenericFor {
+    fn type_of(&self) -> LuauStatementType {
+        LuauStatementType::GenericFor
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+impl LuauGenericFor {
+    pub fn new(
+        bindings: Vec<LuauBinding>,
+        iterators: Vec<Box<dyn LuauExpression>>,
+        body: LuauBlock,
+    ) -> Self {
+        Self {
+            bindings,
+            iterators,
+            body,
+        }
+    }
+}
+
+/// Represents a terminal statement like `return`, `break`, or `continue`.
+#[derive(Debug)]
+pub struct LuauReturnStatement {
+    pub values: Vec<Box<dyn LuauExpression>>,
+}
+
+impl LuauStatement for LuauReturnStatement {
+    fn type_of(&self) -> LuauStatementType {
+        LuauStatementType::Return
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+impl LuauReturnStatement {
+    pub fn new(values: Vec<Box<dyn LuauExpression>>) -> Self {
+        Self { values }
+    }
+}
+
+#[derive(Debug)]
+pub struct LuauBreakStatement;
+
+impl LuauStatement for LuauBreakStatement {
+    fn type_of(&self) -> LuauStatementType {
+        LuauStatementType::Break
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+impl LuauBreakStatement {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[derive(Debug)]
+pub struct LuauContinueStatement;
+
+impl LuauStatement for LuauContinueStatement {
+    fn type_of(&self) -> LuauStatementType {
+        LuauStatementType::Continue
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+impl LuauContinueStatement {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
 /// Represents a `nil` literal.
 ///
 /// Grammar:
@@ -311,6 +684,14 @@ pub struct LuauNilLiteral;
 impl LuauExpression for LuauNilLiteral {
     fn type_of(&self) -> LuauExpressionType {
         LuauExpressionType::Nil
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }
 
@@ -335,6 +716,14 @@ impl LuauExpression for LuauBooleanLiteral {
     fn type_of(&self) -> LuauExpressionType {
         LuauExpressionType::Boolean
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
 }
 
 impl LuauBooleanLiteral {
@@ -358,6 +747,14 @@ impl LuauExpression for LuauNumberLiteral {
     fn type_of(&self) -> LuauExpressionType {
         LuauExpressionType::Number
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
 }
 
 impl LuauNumberLiteral {
@@ -380,6 +777,14 @@ pub struct LuauStringLiteral {
 impl LuauExpression for LuauStringLiteral {
     fn type_of(&self) -> LuauExpressionType {
         LuauExpressionType::String
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }
 
@@ -406,6 +811,14 @@ impl LuauExpression for LuauUnaryExpression {
     fn type_of(&self) -> LuauExpressionType {
         LuauExpressionType::Unary
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
 }
 
 impl LuauUnaryExpression {
@@ -430,6 +843,14 @@ pub struct LuauTableConstructor {
 impl LuauExpression for LuauTableConstructor {
     fn type_of(&self) -> LuauExpressionType {
         LuauExpressionType::TableConstructor
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }
 
@@ -465,6 +886,14 @@ impl LuauExpression for LuauFunctionLiteral {
     fn type_of(&self) -> LuauExpressionType {
         LuauExpressionType::FunctionLiteral
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
 }
 
 impl LuauFunctionLiteral {
@@ -489,6 +918,14 @@ pub struct LuauIfElseExpression {
 impl LuauExpression for LuauIfElseExpression {
     fn type_of(&self) -> LuauExpressionType {
         LuauExpressionType::IfElseExpression
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }
 
@@ -521,6 +958,14 @@ impl LuauExpression for LuauStringInterpolation {
     fn type_of(&self) -> LuauExpressionType {
         LuauExpressionType::StringInterpolation
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
 }
 
 impl LuauStringInterpolation {
@@ -551,6 +996,14 @@ impl LuauExpression for LuauIdentifierLiteral {
     fn type_of(&self) -> LuauExpressionType {
         LuauExpressionType::Identifier
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
 }
 
 impl LuauIdentifierLiteral {
@@ -573,6 +1026,14 @@ pub struct LuauGroupedExpression {
 impl LuauExpression for LuauGroupedExpression {
     fn type_of(&self) -> LuauExpressionType {
         self.expression.type_of()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }
 
@@ -599,6 +1060,14 @@ pub struct LuauBinaryExpression {
 impl LuauExpression for LuauBinaryExpression {
     fn type_of(&self) -> LuauExpressionType {
         LuauExpressionType::Binary
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }
 
@@ -632,6 +1101,14 @@ pub struct LuauFunctionCall {
 impl LuauExpression for LuauFunctionCall {
     fn type_of(&self) -> LuauExpressionType {
         LuauExpressionType::FunctionCall
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }
 
