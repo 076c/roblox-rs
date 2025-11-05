@@ -3,6 +3,7 @@
 /// This module defines the abstract syntax tree used to represent Luau code.
 ///
 ///!
+#[allow(dead_code)]
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -74,6 +75,9 @@ pub enum LuauStatementType {
     Return,
     Break,
     Continue,
+
+    // Not valid in Luau
+    Expression,
 }
 
 /// Enumerates all types of expressions recognized by the Luau grammar.
@@ -92,6 +96,9 @@ pub enum LuauExpressionType {
     Grouped,
     IfElseExpression,
     StringInterpolation,
+    Member,
+    Field,
+    Tuple,
 }
 
 /// Represents any statement node.
@@ -159,13 +166,13 @@ impl LuauTypedef {
 /// ```
 #[derive(Debug)]
 pub struct LuauBinding {
-    pub name: String,
+    pub name: LuauVar,
     pub type_def: Option<LuauTypedef>,
     pub mutable: bool,
 }
 
 impl LuauBinding {
-    pub fn new(name: String, type_def: Option<LuauTypedef>, mutable: bool) -> Self {
+    pub fn new(name: LuauVar, type_def: Option<LuauTypedef>, mutable: bool) -> Self {
         Self {
             name,
             type_def,
@@ -188,6 +195,8 @@ pub enum LuauVar {
     Index(Box<dyn LuauExpression>, Box<dyn LuauExpression>),
     /// Field access, e.g. `tbl.field`.
     Field(Box<dyn LuauExpression>, String),
+    /// Tuple e.g `a, b, c`
+    Tuple(Vec<LuauBinding>),
 }
 
 /// Represents a variable assignment or compound assignment.
@@ -198,7 +207,7 @@ pub enum LuauVar {
 /// ```
 #[derive(Debug)]
 pub struct LuauAssignment {
-    pub left: Vec<LuauVar>,
+    pub left: Vec<LuauBinding>,
     pub right: Vec<Box<dyn LuauExpression>>,
     pub operator: Option<String>, // for +=, -=, etc.
 }
@@ -223,7 +232,7 @@ impl LuauStatement for LuauAssignment {
 
 impl LuauAssignment {
     pub fn new(
-        vars: Vec<LuauVar>,
+        vars: Vec<LuauBinding>,
         expressions: Vec<Box<dyn LuauExpression>>,
         operator: Option<String>,
     ) -> Self {
@@ -235,7 +244,7 @@ impl LuauAssignment {
     }
 
     pub fn new_compound(
-        vars: Vec<LuauVar>,
+        vars: Vec<LuauBinding>,
         op: String,
         expression: Box<dyn LuauExpression>,
     ) -> Self {
@@ -357,6 +366,12 @@ impl LuauFunctionBody {
 pub struct LuauAttribute {
     pub name: String,
     pub parameters: Vec<Box<dyn LuauExpression>>,
+}
+
+impl LuauAttribute {
+    pub fn new(name: String, parameters: Vec<Box<dyn LuauExpression>>) -> Self {
+        Self { name, parameters }
+    }
 }
 
 /// Represents a type alias or type definition.
@@ -1153,5 +1168,147 @@ impl LuauFunctionCall {
             method_name,
             arguments,
         }
+    }
+}
+
+/// Represents a member expression.
+///
+/// Grammar:
+/// ```text
+/// memberexp ::= prefixexp '.' NAME
+/// ```
+#[derive(Debug)]
+pub struct LuauMemberExpression {
+    pub object: Box<dyn LuauExpression>,
+    pub member_name: String,
+    pub generic_arguments: Option<LuauTypedef>,
+}
+
+impl LuauExpression for LuauMemberExpression {
+    fn type_of(&self) -> LuauExpressionType {
+        LuauExpressionType::Member
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+impl LuauMemberExpression {
+    pub fn new(
+        object: Box<dyn LuauExpression>,
+        member_name: String,
+        generic_arguments: Option<LuauTypedef>,
+    ) -> Self {
+        Self {
+            object,
+            member_name,
+            generic_arguments,
+        }
+    }
+}
+
+/// Represents a field expression.
+///
+/// Grammar:
+/// ```text
+/// field ::= '[' exp ']'
+/// ```
+#[derive(Debug)]
+pub struct LuauFieldExpression {
+    pub object: Box<dyn LuauExpression>,
+    pub field_name: Box<dyn LuauExpression>,
+    pub generic_arguments: Option<LuauTypedef>,
+}
+
+impl LuauExpression for LuauFieldExpression {
+    fn type_of(&self) -> LuauExpressionType {
+        LuauExpressionType::Field
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+impl LuauFieldExpression {
+    pub fn new(
+        object: Box<dyn LuauExpression>,
+        field_name: Box<dyn LuauExpression>,
+        generic_arguments: Option<LuauTypedef>,
+    ) -> Self {
+        Self {
+            object,
+            field_name,
+            generic_arguments,
+        }
+    }
+}
+
+// Statements that are not valid in vanilla Luau (post-processed afterwards)
+
+/// Represents an expression statement.
+/// Grammar: ```text
+/// stmt ::= expr [';']
+/// ```
+#[derive(Debug)]
+pub struct LuauExpressionStatement {
+    pub expression: Box<dyn LuauExpression>,
+}
+
+impl LuauStatement for LuauExpressionStatement {
+    fn type_of(&self) -> LuauStatementType {
+        LuauStatementType::Expression
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+impl LuauExpressionStatement {
+    pub fn new(expression: Box<dyn LuauExpression>) -> Self {
+        Self { expression }
+    }
+}
+
+/// Tuple expression
+/// Grammar: ```text
+/// tuple ::= '(' exp { ',' exp } ')'
+/// ```
+#[derive(Debug)]
+pub struct LuauTupleExpression {
+    pub expressions: Vec<Box<dyn LuauExpression>>,
+}
+
+impl LuauExpression for LuauTupleExpression {
+    fn type_of(&self) -> LuauExpressionType {
+        LuauExpressionType::Tuple
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+impl LuauTupleExpression {
+    pub fn new(expressions: Vec<Box<dyn LuauExpression>>) -> Self {
+        Self { expressions }
     }
 }
