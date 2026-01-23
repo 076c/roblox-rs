@@ -1,534 +1,484 @@
-// Rust transformer
-
+///! IR lifting
+///
+/// Converts Syn IR to custom IR
+/// Part of roblox-rs
+// Module imports
 mod ast;
-mod visitor;
-use crate::ast::*;
-use std::collections::HashMap;
-use syn::{Expr, File, Token, parse::Parser, punctuated::Punctuated};
+mod error;
+mod ir;
+mod transpiler;
 
-/// Parses a string into a syn `File`
-pub fn parse_to_ast(source: String) -> Result<File, syn::Error> {
-    syn::parse_str(&source.as_str())
+use proc_macro2::Span;
+use syn::spanned::Spanned;
+use syn::{File, GenericArgument, Ident, Local, LocalInit, Pat, PathArguments, PathSegment, Type};
+
+use crate::error::*;
+use crate::ir::*;
+
+/// Creates a new Error
+fn err<T>(msg: impl Into<String>, span: proc_macro2::Span) -> DiagResult<T> {
+    Err(Diagnostic::new(msg, span))
 }
 
-/// Testing function
-pub fn test() -> Vec<Result<LuauAst, syn::Error>> {
-    let test1 = transform_source("const a: u8 = 1;".to_string());
-
-    vec![Ok(test1)]
+/// Creates a new Diagnostic
+fn diag(msg: &str, span: Span) -> Diagnostic {
+    Diagnostic::new(msg, span)
 }
 
-const NUMBER_INVALID: f64 = -0.0001;
-const STRING_INVALID: &str = "_INVALID";
+/// Parses Rust source code using `Syn`
+pub fn parse_source(source: String) -> Result<File, syn::Error> {
+    syn::parse_str::<File>(&source)
+}
 
-/// Transforms a syn `Lit` into a Luau expression
-pub fn transform_lit(lit: &syn::Lit) -> Option<Box<dyn LuauExpression>> {
-    match lit {
-        syn::Lit::Bool(bool) => Some(Box::new(LuauBooleanLiteral::new(bool.value()))),
-        syn::Lit::Char(char) => Some(Box::new(LuauStringLiteral::new(char.value().to_string()))),
-        syn::Lit::Str(str) => Some(Box::new(LuauStringLiteral::new(str.value().to_string()))),
-        syn::Lit::Int(int) => Some(Box::new(LuauNumberLiteral::new(
-            int.base10_parse::<f64>().unwrap_or(NUMBER_INVALID),
-        ))),
-        syn::Lit::Float(float) => Some(Box::new(LuauNumberLiteral::new(
-            float.base10_parse::<f64>().unwrap_or(NUMBER_INVALID),
-        ))),
-        syn::Lit::CStr(str) => Some(Box::new(LuauStringLiteral::new(
-            str.value().to_str().unwrap_or(STRING_INVALID).to_string(),
-        ))),
-        syn::Lit::Byte(byte) => Some(Box::new(LuauNumberLiteral::new(byte.value().into()))),
-        syn::Lit::ByteStr(str) => Some(Box::new(LuauTableConstructor::new(
-            str.value()
-                .iter()
-                .map(|t| LuauTableField::ArrayValue(Box::new(LuauNumberLiteral::new(*t as f64))))
-                .collect(),
-        ))),
-        syn::Lit::Verbatim(literal) => {
-            let str = literal.to_string();
+/// Lift a Syn `Ident` into a string
+pub fn lift_ident(ident: &Ident) -> DiagResult<String> {
+    Ok(ident.to_string())
+}
 
-            let mut val: Option<Box<dyn LuauExpression>> = match str.as_str() {
-                "true" => Some(Box::new(LuauBooleanLiteral::new(true))),
-                "false" => Some(Box::new(LuauBooleanLiteral::new(false))),
-                _ => None,
-            };
-
-            if val.is_none() {
-                // TODO: add proper parsing to this
-                val = Some(Box::new(LuauStringLiteral::new(str)));
-            }
-
-            return val;
-        }
+/// Lifts a Syn `GenericArgument` into a type
+pub fn lift_generic_argument(arg: &GenericArgument) -> DiagResult<IRType> {
+    match arg {
+        GenericArgument::Type(ty) => Ok(lift_ty(ty)?),
         _ => todo!(),
     }
 }
 
-// macro_rules! transform_macro {
-//     ($expr: expr, $mut_map: expr) => {
-//         let caller = transform_path(&$expr.mac.path);
-//         let parser = Punctuated::<Expr, Token![,]>::parse_terminated;
-//         let args = parser
-//             .parse2($expr.mac.tokens.clone())
-//             .unwrap_or_else(|_| panic!("invalid macro arguments"));
-//         let transformed_args = args
-//             .iter()
-//             .map(|arg| transform_expression(arg, $mut_map).unwrap())
-//             .collect::<Vec<_>>();
-
-//         Some(Box::new(LuauFunctionCall::new(
-//             caller,
-//             None,
-//             transformed_args,
-//         )))
-//     };
-// }
-
-macro_rules! transform_macro {
-    ($expr: expr, $mut_map: expr) => {
-        Box::new({
-            let caller = transform_path(&$expr.mac.path);
-            let parser = Punctuated::<Expr, Token![,]>::parse_terminated;
-            let args = parser
-                .parse2($expr.mac.tokens.clone())
-                .unwrap_or_else(|_| panic!("invalid macro arguments"));
-            let transformed_args = args
-                .iter()
-                .map(|arg| transform_expression(arg, $mut_map).unwrap())
-                .collect::<Vec<_>>();
-
-            LuauFunctionCall::new(caller, None, transformed_args)
-        })
-    };
+/// Lifts a Syn `PathArguments` into a Vec
+pub fn lift_path_arguments_ty(args: &PathArguments) -> DiagResult<Vec<IRType>> {
+    match args {
+        PathArguments::AngleBracketed(args) => Ok(args
+            .args
+            .iter()
+            .map(|el| lift_generic_argument(el))
+            .collect::<Result<Vec<_>, _>>())?,
+        _ => todo!(),
+    }
 }
 
-/// Transforms a syn `Expr` into a Luau expression
-pub fn transform_expression(
-    expr: &syn::Expr,
-    mut_map: &HashMap<String, bool>,
-) -> Option<Box<dyn LuauExpression>> {
-    match expr {
-        syn::Expr::Lit(literal) => transform_lit(&literal.lit),
-        syn::Expr::Array(array) => Some(Box::new(LuauTableConstructor::new(
-            array
-                .elems
-                .iter()
-                .map(|element| {
-                    LuauTableField::ArrayValue(
-                        // TODO: don't use nil expression, panic
-                        transform_expression(element, mut_map)
-                            .unwrap_or(Box::new(LuauNilLiteral::new())),
-                    )
-                })
-                .collect(),
-        ))),
-        syn::Expr::Paren(expr) => Some(Box::new(LuauGroupedExpression::new(transform_expression(
-            &expr.expr, mut_map,
-        )?))),
-        syn::Expr::Binary(binary_expr) => Some(Box::new(LuauBinaryExpression::new(
-            transform_expression(&binary_expr.left, mut_map).unwrap(),
-            transform_bin_op(binary_expr.op),
-            transform_expression(&binary_expr.right, mut_map).unwrap(),
-        ))),
-        syn::Expr::Call(call_expr) => Some(Box::new(LuauFunctionCall::new(
-            transform_expression(&call_expr.func, mut_map).unwrap(),
-            None,
-            call_expr
-                .args
-                .iter()
-                .map(|arg| transform_expression(arg, mut_map).unwrap())
-                .collect(),
-        ))),
-        syn::Expr::Closure(closure_expr) => {
-            Some(Box::new(LuauFunctionLiteral::new(LuauFunctionBody::new(
-                vec![],
-                closure_expr
-                    .inputs
-                    .iter()
-                    .map(|input| {
-                        LuauBinding::new(
-                            match input {
-                                syn::Pat::Ident(i) => LuauVar::Name(i.ident.to_string()),
-                                _ => panic!("invalid parameter"),
-                            },
-                            None,
-                            match input {
-                                syn::Pat::Ident(i) => i.mutability.is_some(),
-                                _ => panic!("invalid parameter"),
-                            },
-                        )
-                    })
-                    .collect(),
-                false,
-                None,
-                match &*closure_expr.body {
-                    syn::Expr::Block(block) => transform_block(&block.block, mut_map),
-                    _ => panic!("invalid expression"),
+/// Lifts a Syn `PathSegment` into a type
+pub fn lift_path_segment_ty(segment: &PathSegment) -> DiagResult<IRType> {
+    match segment.arguments.is_empty() {
+        true => Ok(IRType::SimpleType {
+            base: lift_ident(&segment.ident)?,
+        }),
+        false => Ok(IRType::TypeFunction {
+            caller: lift_ident(&segment.ident)?,
+            args: lift_path_arguments_ty(&segment.arguments)?
+                .into_iter()
+                .map(Box::new)
+                .collect::<Vec<_>>(),
+        }),
+    }
+}
+
+/// Lifts a Syn `PathSegment` into an expression
+pub fn lift_path_segment(segment: &PathSegment) -> DiagResult<String> {
+    Ok(segment.ident.to_string())
+}
+
+/// Lifts a Syn `Type` into a type specifier
+pub fn lift_ty(ty: &Type) -> DiagResult<IRType> {
+    match ty {
+        Type::Infer(_) => Ok(IRType::Infer),
+        Type::Array(array) => Ok(IRType::Array {
+            element_type: Box::new(lift_ty(&array.elem)?),
+            len: 0f64, // TODO: lift expr
+        }),
+        Type::BareFn(bare_fn) => {
+            let mut input_args = Vec::new();
+
+            for element in &bare_fn.inputs {
+                let name = element.name.as_ref().map(|tuple| tuple.0.to_string());
+                let ty = Box::new(lift_ty(&element.ty)?);
+
+                input_args.push((name, ty));
+            }
+
+            Ok(IRType::Function {
+                input_args,
+                return_type: match &bare_fn.output {
+                    syn::ReturnType::Default => None,
+                    syn::ReturnType::Type(_, ty) => Some(Box::new(lift_ty(&ty)?)),
                 },
-            ))))
+            })
         }
-        syn::Expr::Path(path) => match path.path.get_ident() {
-            Some(ident) => Some(Box::new(LuauIdentifierLiteral::new(ident.to_string()))),
-            None => panic!("invalid path"),
-        },
-        syn::Expr::Field(field_expr) => match &field_expr.member {
-            syn::Member::Named(name) => Some(Box::new(LuauMemberExpression::new(
-                transform_expression(&field_expr.base, mut_map).unwrap(),
-                name.to_string(),
-                None,
-            ))),
-            syn::Member::Unnamed(field) => Some(Box::new(LuauFieldExpression::new(
-                transform_expression(&field_expr.base, mut_map).unwrap(),
-                Box::new(LuauNumberLiteral::new(field.index as f64)),
-                None,
-            ))),
-        },
-        syn::Expr::Index(index_expr) => Some(Box::new(LuauFieldExpression::new(
-            transform_expression(&index_expr.expr, mut_map).unwrap(),
-            transform_expression(&index_expr.index, mut_map).unwrap(),
-            None,
-        ))),
-        syn::Expr::Macro(macro_expr) => Some(transform_macro!(macro_expr, mut_map)),
-        syn::Expr::MethodCall(method_expr) => Some(Box::new(LuauFunctionCall::new(
-            transform_expression(&method_expr.receiver, mut_map).unwrap(),
-            Some(method_expr.method.to_string()),
-            method_expr
-                .args
-                .iter()
-                .map(|arg| transform_expression(arg, mut_map).unwrap())
-                .collect(),
-        ))),
-        syn::Expr::Tuple(tuple_expr) => Some(Box::new(LuauTupleExpression::new(
-            tuple_expr
-                .elems
-                .iter()
-                .map(|elem| transform_expression(elem, mut_map).unwrap())
-                .collect(),
-        ))),
-        _ => panic!("unknown type: {:?}", expr),
-    }
-}
+        Type::Path(path) => {
+            let mut segments = path.path.segments.iter();
 
-fn transform_path_arguments(path_argument: &syn::PathArguments) -> Option<LuauTypedef> {
-    match path_argument {
-        syn::PathArguments::None => None,
-        _ => todo!(),
-    }
-}
+            let first = segments
+                .next()
+                .ok_or_else(|| diag("Empty path", path.span()))?;
 
-/// Transforms a syn `Path` into a Luau path
-fn transform_path(path: &syn::Path) -> Box<dyn LuauExpression> {
-    // TODO: compile in path arguments
-    let mut base_path: Box<dyn LuauExpression> = Box::new(LuauIdentifierLiteral::new(
-        path.segments[0].ident.to_string(),
-    ));
+            let mut current = lift_path_segment_ty(first)?;
 
-    for segment in &path.segments {
-        base_path = Box::new(LuauMemberExpression::new(
-            base_path,
-            segment.ident.to_string(),
-            transform_path_arguments(&segment.arguments),
-        ));
-    }
-
-    return base_path;
-}
-
-/// Transforms a syn `BinOp` into a Luau operator
-pub fn transform_bin_op(op: syn::BinOp) -> String {
-    match op {
-        syn::BinOp::Add(_) => "+".to_string(),
-        syn::BinOp::Sub(_) => "-".to_string(),
-        syn::BinOp::Mul(_) => "*".to_string(),
-        syn::BinOp::Div(_) => "/".to_string(),
-        syn::BinOp::Rem(_) => "%".to_string(),
-        syn::BinOp::AddAssign(_) => "+=".to_string(),
-        syn::BinOp::SubAssign(_) => "-=".to_string(),
-        syn::BinOp::MulAssign(_) => "*=".to_string(),
-        syn::BinOp::DivAssign(_) => "/=".to_string(),
-        syn::BinOp::RemAssign(_) => "%=".to_string(),
-        syn::BinOp::And(_) => "and".to_string(),
-        syn::BinOp::Or(_) => "or".to_string(),
-        // TODO: bitwise operators
-        _ => todo!(),
-    }
-}
-
-/// Transforms a syn `Pat` into a Luau variable
-pub fn transform_pat(pat: &syn::Pat) -> (LuauBinding, bool) {
-    // transform_variable!(pat)
-    match pat {
-        syn::Pat::Ident(ident) => {
-            let binding = LuauBinding::new(
-                LuauVar::Name(ident.ident.to_string()),
-                None,
-                ident.mutability.is_some(),
-            );
-            (binding, ident.mutability.is_some())
-        }
-        // references are ignored
-        syn::Pat::Reference(r#ref) => transform_pat(&r#ref.pat),
-        syn::Pat::Tuple(tuple) => {
-            let mut vars = vec![];
-            for field in &tuple.elems {
-                vars.push(transform_pat(field).0);
-            }
-            (LuauBinding::new(LuauVar::Tuple(vars), None, false), false)
-        }
-        syn::Pat::Type(type_pat) => transform_pat(&type_pat.pat),
-        _ => todo!(),
-    }
-}
-
-pub fn transform_statement(
-    statement: &syn::Stmt,
-    mut_map: &HashMap<String, bool>,
-) -> Result<(Option<Vec<Box<dyn LuauStatement>>>, Vec<(String, bool)>), syn::Error> {
-    match statement {
-        syn::Stmt::Item(item) => transform_item(item, mut_map),
-        syn::Stmt::Expr(expr, semicolon) => match semicolon {
-            // Post processed afterwards
-            Some(_) => Ok((
-                Some(vec![Box::new(LuauExpressionStatement::new(
-                    transform_expression(&expr, mut_map).unwrap(),
-                ))]),
-                vec![],
-            )),
-            _ => Ok((
-                Some(vec![Box::new(LuauReturnStatement::new(vec![
-                    transform_expression(&expr, mut_map).unwrap(),
-                ]))]),
-                vec![],
-            )),
-        },
-        syn::Stmt::Macro(mac) => Ok((
-            Some(vec![Box::new(LuauFunctionCallStatement::new(
-                *transform_macro!(mac, mut_map),
-            ))]),
-            vec![],
-        )),
-        syn::Stmt::Local(local) => {
-            let local_binding = transform_pat(&local.pat);
-            let mut initializers = vec![];
-
-            if local.init.is_some() {
-                // TODO: ->diverge
-                initializers.push(
-                    transform_expression(&local.init.as_ref().unwrap().expr, mut_map)
-                        .unwrap_or(Box::new(LuauNilLiteral::new())),
-                );
-            }
-
-            Ok((
-                Some(vec![Box::new(LuauAssignment::new(
-                    vec![local_binding.0],
-                    initializers,
-                    Some("=".to_string()),
-                ))]),
-                vec![],
-            ))
-        }
-    }
-}
-
-/// Transforms a syn `Block` into a Luau block
-pub fn transform_block(block: &syn::Block, mut_map: &HashMap<String, bool>) -> LuauBlock {
-    let mut statements: Vec<Box<dyn LuauStatement>> = vec![];
-    let mut muts_written: Vec<(String, bool)> = vec![];
-    let mut terminator: Option<Box<dyn LuauStatement>> = None;
-
-    for stmt in &block.stmts {
-        let (stmts, muts) = transform_statement(stmt, mut_map).unwrap();
-        if let Some(stmts) = stmts {
-            for stmt in stmts {
-                if terminator.is_some() {
-                    panic!("cannot execute after terminator")
-                }
-
-                match stmt.type_of() {
-                    // Terminators (terminate control flow)
-                    LuauStatementType::Return => terminator = Some(stmt),
-                    LuauStatementType::Continue => terminator = Some(stmt),
-                    LuauStatementType::Break => terminator = Some(stmt),
-
-                    // Don't terminate control flow
-                    _ => statements.push(stmt),
+            for segment in segments {
+                current = IRType::TypeFunction {
+                    caller: match current {
+                        IRType::SimpleType { base } => base,
+                        IRType::TypeFunction { caller, .. } => caller,
+                        _ => return err("Invalid path caller", segment.ident.span()),
+                    },
+                    args: lift_path_arguments_ty(&segment.arguments)?
+                        .into_iter()
+                        .map(Box::new)
+                        .collect(),
                 };
             }
+
+            Ok(current)
         }
-        muts_written.extend(muts);
-    }
-
-    LuauBlock::new(statements, terminator)
-}
-
-/// Transforms a syn `Type` into a Luau type definition
-pub fn transform_type() {}
-
-/// Transforms a syn `FnArg` into a Luau function parameter and returns the mutability
-pub fn transform_fn_arg(function_argument: &syn::FnArg) -> (LuauBinding, bool) {
-    match function_argument {
-        syn::FnArg::Receiver(reciever) => (
-            LuauBinding::new(
-                LuauVar::Name("self".to_string()),
-                None,
-                reciever.mutability.is_some(),
-            ),
-            reciever.mutability.is_some(),
-        ),
-        syn::FnArg::Typed(typed) => transform_pat(&typed.pat),
+        Type::Paren(ty) => Ok(IRType::Paren {
+            ty: Box::new(lift_ty(&ty.elem)?),
+        }),
+        Type::Ptr(ptr) => err("Raw pointers are not allowed", ptr.star_token.span),
+        Type::Reference(reference) => err("References are not allowed", reference.and_token.span),
+        _ => todo!(),
     }
 }
 
-/// Transforms a syn `Item` into a top-level Luau statement
-/// and returns the statement and the new mutabilities written
-pub fn transform_item(
-    item: &syn::Item,
-    mut_map: &HashMap<String, bool>,
-) -> Result<(Option<Vec<Box<dyn LuauStatement>>>, Vec<(String, bool)>), syn::Error> {
-    match item {
-        syn::Item::Const(const_item) => {
-            let name = const_item.ident.to_string();
-            if mut_map.contains_key(&name) && *mut_map.get(&name).unwrap_or(&true) == false {
-                // TODO: nested `let` values can overwrite outside `const` values. Fix this
-                return Err(syn::Error::new(
-                    const_item.ident.span(),
-                    "mutating immutable variable",
-                ));
+/// Lifts a Syn `Pat` into an identifier
+pub fn lift_pat(pat: &Pat, ty: Option<&Type>) -> DiagResult<IRIdent> {
+    match pat {
+        Pat::Ident(ident) => Ok(IRIdent::Identifier {
+            name: ident.ident.to_string(),
+            mutable: ident.mutability.is_some(),
+            ty: match ty {
+                None => None,
+                Some(ty) => Some(lift_ty(ty)?),
+            },
+            // TODO: init
+            init: None,
+        }),
+        Pat::Type(pat_ty) => {
+            let lifted_pat = lift_pat(&pat_ty.pat, Some(&pat_ty.ty))?;
+
+            return Ok(lifted_pat);
+        }
+        Pat::Tuple(tuple) => Ok(IRIdent::Tuple {
+            idents: tuple
+                .elems
+                .iter()
+                .map(|el| lift_pat(&el, None))
+                .collect::<Result<Vec<_>, _>>()?,
+        }),
+        _ => panic!("Invalid pattern"),
+    }
+}
+
+/// Lifts a Syn `Member` into a string
+pub fn lift_member(member: &syn::Member) -> DiagResult<String> {
+    match member {
+        syn::Member::Named(ident) => Ok(ident.to_string()),
+        syn::Member::Unnamed(index) => Ok(index.index.to_string()),
+    }
+}
+
+/// Lifts a Syn `Expr` into an expression
+pub fn lift_expr(expr: &syn::Expr) -> DiagResult<IRExpr> {
+    match expr {
+        syn::Expr::Call(call) => {
+            let caller = lift_expr(&call.func);
+
+            let arguments = call
+                .args
+                .iter()
+                .map(|arg| lift_expr(arg))
+                .collect::<Result<Vec<_>, _>>()?;
+
+            Ok(IRExpr::Call {
+                callee: Box::new(caller?),
+                arguments: arguments,
+            })
+        }
+        syn::Expr::Array(array) => {
+            let elements = array
+                .elems
+                .iter()
+                .map(|el| lift_expr(el))
+                .collect::<Result<Vec<_>, _>>()?;
+
+            Ok(IRExpr::Array(elements))
+        }
+        syn::Expr::Lit(lit) => match &lit.lit {
+            syn::Lit::Bool(bool) => Ok(IRExpr::Bool(bool.value)),
+            syn::Lit::Int(int) => Ok(IRExpr::Number(int.base10_parse::<f64>().unwrap() as f64)),
+            syn::Lit::Float(float) => {
+                Ok(IRExpr::Number(float.base10_parse::<f64>().unwrap() as f64))
             }
-            let expr = transform_expression(&const_item.expr, mut_map);
+            syn::Lit::Str(str) => Ok(IRExpr::String(str.value())),
+            syn::Lit::Char(char) => Ok(IRExpr::Char(char.value().into())),
+            syn::Lit::ByteStr(byte_str) => Ok(IRExpr::ByteString(byte_str.value())),
+            syn::Lit::CStr(c_str) => Ok(IRExpr::CString(c_str.value().to_str().unwrap().into())),
+            _ => todo!(),
+        },
+        syn::Expr::Binary(bin) => {
+            let left = lift_expr(&bin.left)?;
+            let right = lift_expr(&bin.right)?;
 
-            Ok((
-                Some(vec![Box::new(LuauAssignment::new(
-                    // TODO: don't use clone?
-                    vec![LuauBinding::new(
-                        LuauVar::Name(name.clone()),
-                        None,
-                        false, // const values are always immutable
-                    )],
-                    vec![expr.unwrap_or(Box::new(LuauNilLiteral::new()))],
-                    Some("=".to_string()),
-                ))]),
-                vec![(name, false)],
-            ))
+            Ok(IRExpr::BinaryOperation {
+                left: Box::new(left),
+                operator: match bin.op {
+                    syn::BinOp::Add(_) => IRBinOp::Plus,
+                    syn::BinOp::Sub(_) => IRBinOp::Minus,
+                    syn::BinOp::Mul(_) => IRBinOp::Mul,
+                    syn::BinOp::Div(_) => IRBinOp::Div,
+                    syn::BinOp::Rem(_) => IRBinOp::Rem,
+                    syn::BinOp::And(_) => IRBinOp::LogAnd,
+                    syn::BinOp::Or(_) => IRBinOp::LogOr,
+                    syn::BinOp::BitXor(_) => IRBinOp::BitXor,
+                    syn::BinOp::BitAnd(_) => IRBinOp::BitAnd,
+                    syn::BinOp::BitOr(_) => IRBinOp::BitOr,
+                    syn::BinOp::Shl(_) => IRBinOp::BitShl,
+                    syn::BinOp::Shr(_) => IRBinOp::BitShr,
+                    syn::BinOp::Eq(_) => IRBinOp::Eq,
+                    syn::BinOp::Ne(_) => IRBinOp::Ne,
+                    syn::BinOp::Lt(_) => IRBinOp::Lt,
+                    syn::BinOp::Le(_) => IRBinOp::Le,
+                    syn::BinOp::Gt(_) => IRBinOp::Gt,
+                    syn::BinOp::Ge(_) => IRBinOp::Ge,
+                    _ => todo!(),
+                },
+                right: Box::new(right),
+            })
         }
+        syn::Expr::Tuple(tuple) => Ok(IRExpr::Tuple(
+            tuple
+                .elems
+                .iter()
+                .map(|expr| lift_expr(expr))
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        syn::Expr::Path(path) => {
+            let segments = path
+                .path
+                .segments
+                .iter()
+                .map(|seg| lift_path_segment(seg))
+                .collect::<Result<Vec<_>, _>>()?;
 
-        syn::Item::Static(static_item) => {
-            let name = static_item.ident.to_string();
-
-            Ok((
-                Some(vec![Box::new(LuauAssignment::new(
-                    // TODO: don't use clone?
-                    vec![LuauBinding::new(
-                        LuauVar::Name(name.clone()),
-                        None,
-                        match static_item.mutability {
-                            syn::StaticMutability::Mut(_) => true,
-                            _ => false,
-                        },
-                    )],
-                    vec![
-                        transform_expression(&static_item.expr, mut_map)
-                            .unwrap_or(Box::new(LuauNilLiteral::new())),
-                    ],
-                    Some("=".to_string()),
-                ))]),
-                vec![(name, false)],
-            ))
+            Ok(IRExpr::Path(segments))
         }
+        syn::Expr::Closure(closure) => {
+            let parameters = closure
+                .inputs
+                .iter()
+                .map(|param| lift_pat(&param, None))
+                .collect::<Result<Vec<_>, _>>()?;
 
-        syn::Item::Fn(function_item) => {
-            let function_name = function_item.sig.ident.to_string();
-            let parameters: Vec<_> = function_item
+            let body = lift_expr(&closure.body)?;
+
+            Ok(IRExpr::Closure {
+                parameters: parameters,
+                body: Box::new(body),
+                is_move: closure.movability.is_some(),
+                return_type: Some(lift_return_type(&closure.output)?),
+            })
+        }
+        syn::Expr::Paren(paren) => Ok(IRExpr::Paren(Box::new(lift_expr(&paren.expr)?))),
+        syn::Expr::Block(block) => Ok(IRExpr::Block {
+            statements: block
+                .block
+                .stmts
+                .iter()
+                .map(|stmt| lift_stmt(stmt))
+                .collect::<Result<Vec<_>, _>>()?,
+            expr: None,
+        }),
+        syn::Expr::Try(expr) => Ok(IRExpr::Try(Box::new(lift_expr(&expr.expr)?))),
+        syn::Expr::Await(expr) => Ok(IRExpr::Await(Box::new(lift_expr(&expr.base)?))),
+        syn::Expr::MethodCall(method_call) => {
+            let callee = lift_expr(&method_call.receiver)?;
+            let method = method_call.method.to_string();
+
+            let arguments = method_call
+                .args
+                .iter()
+                .map(|arg| lift_expr(&arg))
+                .collect::<Result<Vec<_>, _>>()?;
+
+            Ok(IRExpr::MethodCall {
+                callee: Box::new(callee),
+                method: method,
+                arguments: arguments,
+            })
+        }
+        syn::Expr::Field(field_expr) => Ok(IRExpr::Member {
+            base: Box::new(lift_expr(&field_expr.base)?),
+            name: lift_member(&field_expr.member)?,
+        }),
+        syn::Expr::Index(index_expr) => Ok(IRExpr::Index {
+            base: Box::new(lift_expr(&index_expr.expr)?),
+            index: Box::new(lift_expr(&index_expr.index)?),
+        }),
+        syn::Expr::If(if_expr) => {
+            let condition = lift_expr(&if_expr.cond)?;
+            let then_branch = lift_block(&if_expr.then_branch)?;
+
+            let else_branch = match &if_expr.else_branch {
+                None => None,
+                Some(expr) => Some(Box::new(lift_expr(&expr.1)?)),
+            };
+
+            Ok(IRExpr::IfExpression {
+                condition: Box::new(condition),
+                then_clause: Box::new(IRExpr::Block {
+                    statements: then_branch,
+                    expr: None,
+                }),
+                else_clause: else_branch,
+            })
+        }
+        syn::Expr::While(while_loop) => {
+            let condition = lift_expr(&while_loop.cond)?;
+            let body = lift_block(&while_loop.body)?;
+
+            Ok(IRExpr::While {
+                condition: Box::new(condition),
+                body: Box::new(IRExpr::Block {
+                    statements: body,
+                    expr: None,
+                }),
+            })
+        }
+        syn::Expr::Cast(cast) => Ok(IRExpr::Cast {
+            expr: Box::new(lift_expr(&cast.expr)?),
+            ty: Box::new(lift_ty(&cast.ty)?),
+        }),
+        syn::Expr::ForLoop(for_loop) => Ok(IRExpr::ForLoop {
+            iterator: Box::new(lift_expr(&for_loop.expr)?),
+            variable: lift_pat(&for_loop.pat, None)?,
+            body: Box::new(IRExpr::Block {
+                statements: lift_block(&for_loop.body)?,
+                expr: None,
+            }),
+        }),
+        syn::Expr::Loop(loop_expr) => {
+            let body = lift_block(&loop_expr.body)?;
+
+            Ok(IRExpr::Loop {
+                body: Box::new(IRExpr::Block {
+                    statements: body,
+                    expr: None,
+                }),
+            })
+        }
+        syn::Expr::Struct(struct_lit) => Ok(IRExpr::Struct {
+            name: Box::new(IRExpr::Path(
+                struct_lit
+                    .path
+                    .segments
+                    .iter()
+                    .map(|seg| lift_path_segment(seg))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )),
+            fields: struct_lit
+                .fields
+                .iter()
+                .map(|field| Ok((lift_member(&field.member)?, lift_expr(&field.expr)?)))
+                .collect::<Result<Vec<_>, _>>()?,
+        }),
+        syn::Expr::Reference(_) => panic!("References are not allowed."),
+        _ => panic!("{:#?} not implemented", expr),
+    }
+}
+
+/// Lifts a Syn `LocalInit` into an expression
+pub fn lift_local_init(init: &LocalInit) -> DiagResult<IRExpr> {
+    lift_expr(&init.expr)
+}
+
+/// Lifts a Syn `Local` into a statement
+pub fn lift_local(stmt: Local) -> DiagResult<IRStmt> {
+    let ident = lift_pat(&stmt.pat, None)?;
+    let init = match &stmt.init {
+        None => IRExpr::Null,
+        Some(init) => lift_local_init(init)?,
+    };
+
+    Ok(IRStmt::Let {
+        variable: ident,
+        expr: init,
+    })
+}
+
+/// Lifts a Syn `Visibility` into a string
+pub fn lift_visibility(vis: &syn::Visibility) -> DiagResult<String> {
+    match vis {
+        syn::Visibility::Public(_) => Ok("public".into()),
+        syn::Visibility::Inherited => Ok("inherited".into()),
+        syn::Visibility::Restricted(_restriction) => {
+            // TODO: implement restrictions
+            Ok("restricted".into())
+        }
+    }
+}
+
+/// Lifts a Syn `ReturnType` into an IRType
+pub fn lift_return_type(ty: &syn::ReturnType) -> DiagResult<IRType> {
+    match ty {
+        syn::ReturnType::Default => Ok(IRType::None),
+        syn::ReturnType::Type(_, ty) => Ok(lift_ty(ty)?),
+    }
+}
+
+/// Lifts a Syn `Block` into an array of statements
+fn lift_block(block: &syn::Block) -> Result<Vec<IRStmt>, Diagnostic> {
+    block.stmts.iter().map(|stmt| lift_stmt(stmt)).collect()
+}
+
+/// Lifts a Syn `Stmt` into a statement
+pub fn lift_stmt(stmt: &syn::Stmt) -> DiagResult<IRStmt> {
+    match stmt {
+        syn::Stmt::Item(item) => lift_item(item),
+        syn::Stmt::Local(local) => lift_local(local.clone()),
+        syn::Stmt::Expr(expr, semi) => match semi {
+            None => Ok(IRStmt::Expr(lift_expr(expr)?)),
+            Some(_) => Ok(IRStmt::Semi(lift_expr(expr)?)),
+        },
+        _ => todo!(),
+    }
+}
+
+/// Lifts a Syn `Item` into a statement
+pub fn lift_item(item: &syn::Item) -> DiagResult<IRStmt> {
+    match item {
+        syn::Item::Fn(function) => {
+            let visibility = lift_visibility(&function.vis)?;
+            let name = function.sig.ident.to_string();
+
+            let params: Vec<IRIdent> = function
                 .sig
                 .inputs
                 .iter()
-                .map(transform_fn_arg)
-                .collect();
-
-            let bindings = parameters
-                .iter()
-                .map(|param| {
-                    LuauBinding::new(
-                        match &param.0.name {
-                            LuauVar::Name(name) => LuauVar::Name(name.to_string()),
-                            _ => panic!("invalid parameter"),
-                        },
-                        None,
-                        param.1,
-                    )
+                .map(|param| -> Result<IRIdent, Diagnostic> {
+                    match param {
+                        syn::FnArg::Typed(arg) => lift_pat(&arg.pat, Some(&arg.ty)),
+                        syn::FnArg::Receiver(re) => {
+                            Err(diag("`self` parameters are not supported yet", re.span()))
+                        }
+                    }
                 })
-                .collect();
+                .collect::<Result<_, _>>()?;
 
-            Ok((
-                Some(vec![Box::new(LuauFunctionDeclaration::new(
-                    // TODO: repeated use of clone :(
-                    function_name.clone(),
-                    vec![],
-                    LuauFunctionBody::new(
-                        vec![],
-                        bindings,
-                        false,
-                        None,
-                        transform_block(&function_item.block, mut_map),
-                    ),
-                ))]),
-                vec![(function_name, false)],
-            ))
+            Ok(IRStmt::FnDecl {
+                name: name,
+                parameters: params,
+                return_type: lift_return_type(&function.sig.output)?,
+                body: lift_block(&function.block)?
+                    .into_iter()
+                    .map(Box::new)
+                    .collect::<Vec<_>>(),
+                vis: visibility,
+            })
         }
-        syn::Item::Macro(mac) => match &mac.ident {
-            Some(_ident) => Ok((None, vec![])),
-            None => Ok((
-                Some(vec![Box::new(LuauFunctionCallStatement::new(
-                    *transform_macro!(mac, mut_map),
-                ))]),
-                vec![],
-            )),
-        },
         _ => todo!(),
     }
 }
 
-/// Transforms the syn `File` tree into a Luau AST without applying any modifications
-pub fn transform(ast: &File) -> LuauAst {
-    // Statements that get transformed
-    let mut statements: Vec<Box<dyn LuauStatement>> = vec![];
-
-    // Mutability map to store mutability of variables
-    let mut mutability_map: HashMap<String, bool> = HashMap::new();
-
-    // Last statement that terminates the block (main scope)
-    let terminator: Option<Box<dyn LuauStatement>> = None;
-
-    // Iterate every statement and add it to the list of statements
-    ast.items.iter().for_each(|item| {
-        let (created_statements, muts_written) = match transform_item(item, &mutability_map) {
-            Ok((statements, muts_written)) => (statements, muts_written),
-            Err(err) => {
-                panic!("{}", err);
-            }
-        };
-
-        if let Some(created_statements) = created_statements {
-            for stmt in created_statements {
-                statements.push(stmt);
-            }
-        }
-
-        muts_written.iter().for_each(|m| {
-            mutability_map.insert(m.0.clone(), m.1);
-        });
-    });
-
-    LuauAst {
-        main_block: LuauBlock {
-            statements: statements,
-            last_statement: terminator,
-            mutability_map: mutability_map,
-        },
-    }
-}
-
-/// Transforms Rust source code into a Luau AST
-pub fn transform_source(source: String) -> LuauAst {
-    transform(&parse_to_ast(source).unwrap_or_else(|err| panic!("{}", err)))
+/// Converts a Syn tree into IR
+pub fn lift_syn(file: &File) -> DiagResult<Vec<IRStmt>> {
+    file.items
+        .iter()
+        .map(|item| lift_item(item))
+        .collect::<Result<Vec<_>, _>>()
 }
