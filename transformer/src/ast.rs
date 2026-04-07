@@ -5,6 +5,7 @@
 /// Follows the Luau grammar
 
 /// Luau compound operators
+#[derive(Clone, Debug)]
 pub enum LuauCompoundOp {
     Add,      // +=
     Sub,      // -=
@@ -17,6 +18,7 @@ pub enum LuauCompoundOp {
 }
 
 /// Luau binary operators
+#[derive(Clone, Debug)]
 pub enum LuauBinOp {
     Add,      // +
     Sub,      // -
@@ -37,6 +39,7 @@ pub enum LuauBinOp {
 }
 
 /// Luau unary operators
+#[derive(Clone, Debug)]
 pub enum LuauUnaryOperators {
     Neg, // -
     Len, // #
@@ -44,6 +47,7 @@ pub enum LuauUnaryOperators {
 }
 
 /// Luau statements
+#[derive(Clone, Debug)]
 pub enum LuauStatement {
     /// Variable assignment (`foo = bar`)
     Assignment {
@@ -156,6 +160,7 @@ pub enum LuauStatement {
 }
 
 /// Luau expressions
+#[derive(Clone, Debug)]
 pub enum LuauExpression {
     /// Nil literal
     Nil,
@@ -182,6 +187,7 @@ pub enum LuauExpression {
     FunctionCall {
         callee: Box<LuauExpression>,
         arguments: Vec<LuauExpression>,
+        method: Option<String>,
     },
 
     /// Member access (.)
@@ -223,16 +229,16 @@ pub enum LuauExpression {
     /// Type-cast expression
     Typecast {
         expression: Box<LuauExpression>,
-        ty: LuauType,
+        ty: Box<LuauType>,
     },
 
     /// Closure / anonymous function
     FunctionLiteral {
-        parameters: Vec<LuauBinding>,
-        vararg: Option<LuauBinding>,
+        parameters: Vec<Box<LuauBinding>>,
+        vararg: Option<Box<LuauBinding>>,
         body: Vec<LuauStatement>,
         generics: Option<Vec<String>>,
-        return_type: Option<LuauType>,
+        return_type: Option<Box<LuauType>>,
         attributes: Vec<LuauAttribute>,
     },
 
@@ -241,6 +247,7 @@ pub enum LuauExpression {
 }
 
 /// Luau table entry
+#[derive(Clone, Debug)]
 pub enum LuauTableEntry {
     Named {
         index: String,
@@ -250,6 +257,7 @@ pub enum LuauTableEntry {
 }
 
 /// Luau binding (variable)
+#[derive(Clone, Debug)]
 pub enum LuauBinding {
     Identifier {
         name: String,
@@ -259,12 +267,14 @@ pub enum LuauBinding {
 }
 
 /// Luau attribute (e.g., `@attr`, `@[attr(...)]`)
+#[derive(Clone, Debug)]
 pub struct LuauAttribute {
     pub name: String,
     pub args: Vec<LuauExpression>,
 }
 
 /// Luau type
+#[derive(Clone, Debug)]
 pub enum LuauType {
     Nil,
     Boolean,
@@ -283,4 +293,19 @@ pub enum LuauType {
     Tuple(Vec<LuauType>),
     Variadic(Box<LuauType>),
     Generic(String),
+    Literal(LuauExpression),
+    Typeof(LuauExpression),
+    MemberAccess {
+        base: Box<LuauType>,
+        field: String,
+    },
+    TypeFunction {
+        caller: String,
+        args: Vec<Box<LuauType>>,
+    },
+
+    // any, unknown, never
+    Any,
+    Unknown,
+    Never,
 }

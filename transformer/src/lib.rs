@@ -3,10 +3,10 @@
 /// Converts Syn IR to custom IR
 /// Part of roblox-rs
 // Module imports
-mod ast;
-mod error;
-mod ir;
-mod transpiler;
+pub mod ast;
+pub mod error;
+pub mod ir;
+pub mod transpiler;
 
 use proc_macro2::Span;
 use syn::spanned::Spanned;
@@ -471,6 +471,23 @@ pub fn lift_item(item: &syn::Item) -> DiagResult<IRStmt> {
                 vis: visibility,
             })
         }
+
+        // TODO: make const ACTUALLY const
+        syn::Item::Const(r#const) => {
+            let val = lift_expr(&r#const.expr);
+            let ident = lift_ident(&r#const.ident);
+
+            Ok(IRStmt::Let {
+                variable: IRIdent::Identifier {
+                    name: ident?,
+                    mutable: false,
+                    ty: Some(lift_ty(&r#const.ty)?),
+                    init: None,
+                },
+                expr: val?,
+            })
+        }
+
         _ => todo!(),
     }
 }

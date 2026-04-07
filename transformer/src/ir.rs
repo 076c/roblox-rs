@@ -337,10 +337,9 @@ pub enum IRStmt {
         /// Visibility
         vis: String,
     },
-
-    /// If statement
-    IfStatement {
-        /// The if expression
-        expr: IRExpr,
-    },
+    // /// If statement
+    // IfStatement {
+    //     /// The if expression
+    //     expr: IRExpr,
+    // },
 }
